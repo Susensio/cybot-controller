@@ -1,6 +1,8 @@
 /*
  * fxpt_atan2.c
  *
+ * https://geekshavefeelings.com/posts/fixed-point-atan2
+ *
  * Copyright (C) 2012, Xo Wang
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
@@ -22,7 +24,7 @@
  * SOFTWARE.
  *
  */
-
+#include "fxpt_atan2.h"
 #include <math.h>
 #include <stdint.h>
 
@@ -64,9 +66,9 @@ static inline int16_t s16_nabs(const int16_t j) {
  * @param k same format as j
  * @return product of j and k, in same format
  */
-static inline int16_t q15_mul(const int16_t j, const int16_t k) {
+inline int16_t q15_mul(const int16_t j, const int16_t k) {
     const int32_t intermediate = j * (int32_t)k;
-#if 0 // don't round
+#if 1 // don't round
     return intermediate >> 15;
 #elif 0 // biased rounding
     return (intermediate + 0x4000) >> 15;
