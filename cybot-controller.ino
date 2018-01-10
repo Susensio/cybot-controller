@@ -4,17 +4,7 @@
 
 #include <TaskScheduler.h>
 
-#include "fxpt_atan2.h"
-
-#define DEBUG
-
-#ifdef DEBUG
- #define DEBUG_PRINT(x)  Serial.print(x)
- #define DEBUG_PRINTLN(x)  Serial.println(x)
-#else
- #define DEBUG_PRINT(x)
- #define DEBUG_PRINTLN(x)
-#endif
+//#include "fxpt_atan2.h"
 
 // H-Bridge motor pins                      7 pin socket driver
 const byte MOTOR_RIGHT_FORWARDS_PIN = 11;   // 1. Blue
@@ -25,8 +15,14 @@ const byte MOTOR_LEFT_BACKWARDS_PIN = 6;    // 4. White// LED Antennas
 const int LED_LEFT_PIN = 2;
 const int LED_RIGHT_PIN = 3;
 
-// MPU variables
+// Interrupt
 const byte INTERRUPT_PIN = 2;  // use pin 2 on Arduino Uno & most boards
+volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
+void dmpDataReady() {
+    mpuInterrupt = true;
+}
+
+// MPU variables
 MPU6050 mpu;
 volatile uint8_t fifoBuffer[14]; // FIFO storage buffer
 
@@ -42,18 +38,22 @@ Task controlTask(100, TASK_FOREVER, &controlCallback);
 Scheduler runner;
 
 
+
+Quaternion q;           // [w, x, y, z]         quaternion container
+
+
 void controlCallback() {
-    static int lastYaw;
+    static float lastYaw;
 
-    int yaw = getYaw();
-    DEBUG_PRINTLN(yaw);
+    float yaw = getYaw();
+    //Serial.println(yaw);
 
-    int angularVelocity = (yaw - lastYaw);
+    float angularVelocity = (yaw - lastYaw);
 
     setReference(linearVelocityRef, 2*angularVelocityRef - angularVelocity);
 
 
-    DEBUG_PRINTLN(angularVelocity);
+    Serial.println(angularVelocity);
     lastYaw = yaw;
 }
 
@@ -65,15 +65,36 @@ void setup() {
     ledsSetup();
 
     mpuSetup();
+    
+    runner.init();
+    runner.addTask(controlTask);
+    controlTask.enable();
 }
 
 
 void loop() {
+    if (mpuInterrupt) {
+        mpuInterrupt = false;
+        int mpuIntStatus = mpu.getIntStatus();
+        int fifoCount = mpu.getFIFOCount();
+        
+        if ((mpuIntStatus & 0x10) || fifoCount == 1024)
+            // reset so we can continue cleanly
+            mpu.resetFIFO();
+            
+        if (mpuIntStatus & 0x02 && fifoCount >= 16) {
+            // read a quaternions from FIFO
+            mpu.getFIFOBytes(fifoBuffer, 14);
+            // clear the buffer and start over to discard the remaining bytes.
+            mpu.resetFIFO();
+        }
+    }
+    
     runner.execute();
 }
 
 
-int getYaw() {
+float getYaw() {
     noInterrupts();
     int w = ((fifoBuffer[0] << 8) | fifoBuffer[1]);
     int x = ((fifoBuffer[4] << 8) | fifoBuffer[5]);
@@ -81,16 +102,9 @@ int getYaw() {
     int z = ((fifoBuffer[12] << 8) | fifoBuffer[13]);
     interrupts();
 
-    DEBUG_PRINTLN(w);
-    DEBUG_PRINTLN(x);
-    DEBUG_PRINTLN(y);
-    DEBUG_PRINTLN(z);
-    DEBUG_PRINTLN();
-
-    //atan2(2*x*y - 2*w*z, 2*w*w + 2*x*x - 1);  all divided by 4
-    int yaw = (int)fxpt_atan2((q15_mul(x,y)/2 - q15_mul(w,z)/2),
-                    (q15_mul(w,w)/2 + (q15_mul(x,x) - 0x4000)/2));
-
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    float yaw = atan2(2*q.x*q.y - 2*q.w*q.z, 2*q.w*q.w + 2*q.x*q.x - 1) * 180/M_PI;
+    
     return yaw;
 }
 
@@ -137,36 +151,37 @@ void mpuSetup() {
     Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
 
     // initialize device
-    DEBUG_PRINTLN(F("Initializing I2C devices..."));
+    Serial.println(F("Initializing I2C devices..."));
     mpu.initialize();
     pinMode(INTERRUPT_PIN, INPUT);
 
     // verify connection
-    DEBUG_PRINTLN(F("Testing device connections..."));
-    DEBUG_PRINTLN(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+    Serial.println(F("Testing device connections..."));
+    Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
 
     // load and configure the DMP
-    DEBUG_PRINTLN(F("Initializing DMP..."));
+    Serial.println(F("Initializing DMP..."));
     mpu.dmpInitialize();
 
     // supply your own gyro offsets here, scaled for min sensitivity
     mpu.setXGyroOffset(220);
     mpu.setYGyroOffset(76);
     mpu.setZGyroOffset(-85);
-    mpu.setXAccelOffset(0);
-    mpu.setYAccelOffset(0);
+    mpu.setXAccelOffset(5);
+    mpu.setYAccelOffset(10);
     mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
 
     // turn on the DMP, now that it's ready
-    DEBUG_PRINTLN(F("Enabling DMP..."));
+    Serial.println(F("Enabling DMP..."));
     mpu.setDMPEnabled(true);
 
     // enable Arduino interrupt detection
-    DEBUG_PRINTLN(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
+    Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
     attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
 
     // set our DMP Ready flag so the main loop() function knows it's okay to use it
-    DEBUG_PRINTLN(F("DMP ready! Waiting for first interrupt..."));
+    Serial.println(F("DMP ready! Waiting for first interrupt..."));
+    
 }
 
 void motorsSetup() {
@@ -181,14 +196,4 @@ void ledsSetup() {
     pinMode(LED_RIGHT_PIN,OUTPUT);
 }
 
-
-/*********** INTERRUPT ROUTINES ***********/
-
-void dmpDataReady() {
-    // read a quaternions from FIFO
-    mpu.getFIFOBytes(fifoBuffer, 14);
-    // clear the buffer and start over to discard the remaining bytes.
-    mpu.resetFIFO();
-        
-}
 
